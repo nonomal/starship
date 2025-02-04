@@ -1,7 +1,11 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Deserialize, Serialize)]
-#[cfg_attr(feature = "config-schema", derive(schemars::JsonSchema))]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(schemars::JsonSchema),
+    schemars(deny_unknown_fields)
+)]
 #[serde(default)]
 pub struct PerlConfig<'a> {
     pub format: &'a str,
@@ -14,7 +18,7 @@ pub struct PerlConfig<'a> {
     pub detect_folders: Vec<&'a str>,
 }
 
-impl<'a> Default for PerlConfig<'a> {
+impl Default for PerlConfig<'_> {
     fn default() -> Self {
         PerlConfig {
             format: "via [$symbol($version )]($style)",

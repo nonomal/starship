@@ -12,7 +12,7 @@ use crate::formatter::{StringFormatter, VersionFormatter};
 use crate::utils::create_command;
 use home::rustup_home;
 
-use once_cell::sync::OnceCell;
+use std::sync::OnceLock;
 
 use guess_host_triple::guess_host_triple;
 
@@ -22,23 +22,23 @@ type ToolchainString = String;
 /// A struct to cache the output of any commands that need to be run.
 struct RustToolingEnvironmentInfo {
     /// Rustup settings parsed from $HOME/.rustup/settings.toml
-    rustup_settings: OnceCell<RustupSettings>,
+    rustup_settings: OnceLock<RustupSettings>,
     /// Rustc toolchain overrides as contained in the environment or files
-    env_toolchain_override: OnceCell<Option<String>>,
+    env_toolchain_override: OnceLock<Option<String>>,
     /// The output of `rustup rustc --version` with a fixed toolchain
-    rustup_rustc_output: OnceCell<RustupRunRustcVersionOutcome>,
+    rustup_rustc_output: OnceLock<RustupRunRustcVersionOutcome>,
     /// The output of running rustc -vV. Only called if rustup rustc fails or
     /// is unavailable.
-    rustc_verbose_output: OnceCell<Option<(VersionString, ToolchainString)>>,
+    rustc_verbose_output: OnceLock<Option<(VersionString, ToolchainString)>>,
 }
 
 impl RustToolingEnvironmentInfo {
     fn new() -> Self {
         Self {
-            rustup_settings: OnceCell::new(),
-            env_toolchain_override: OnceCell::new(),
-            rustup_rustc_output: OnceCell::new(),
-            rustc_verbose_output: OnceCell::new(),
+            rustup_settings: OnceLock::new(),
+            env_toolchain_override: OnceLock::new(),
+            rustup_rustc_output: OnceLock::new(),
+            rustc_verbose_output: OnceLock::new(),
         }
     }
 
@@ -55,9 +55,10 @@ impl RustToolingEnvironmentInfo {
         // To display appropriate versions preventing `rustc` from downloading toolchains, we have to
         // check
         // 1. `$RUSTUP_TOOLCHAIN`
-        // 2. `rustup override list`
+        // 2. The override list from ~/.rustup/settings.toml (like `rustup override list`)
         // 3. `rust-toolchain` or `rust-toolchain.toml` in `.` or parent directories
-        // 4. `rustup default`
+        // 4. The `default_toolchain` from ~/.rustup/settings.toml (like `rustup default`)
+        // 5. `rustup default` (in addition to the above, this also looks at global fallback config files)
         // as `rustup` does.
         // https://github.com/rust-lang/rustup.rs/tree/eb694fcada7becc5d9d160bf7c623abe84f8971d#override-precedence
         //
@@ -74,6 +75,11 @@ impl RustToolingEnvironmentInfo {
                             .lookup_override(context.current_dir.as_path())
                     })
                     .or_else(|| find_rust_toolchain_file(context))
+                    .or_else(|| {
+                        self.get_rustup_settings(context)
+                            .default_toolchain()
+                            .map(std::string::ToString::to_string)
+                    })
                     .or_else(|| execute_rustup_default(context));
 
                 log::debug!("Environmental toolchain override is {:?}", out);
@@ -83,16 +89,36 @@ impl RustToolingEnvironmentInfo {
     }
 
     /// Gets the output of running `rustup rustc --version` with a toolchain
-    /// specified by self.get_env_toolchain_override()
+    /// specified by `self.get_env_toolchain_override()`
     fn get_rustup_rustc_version(&self, context: &Context) -> &RustupRunRustcVersionOutcome {
         self.rustup_rustc_output.get_or_init(|| {
             let out = if let Some(toolchain) = self.get_env_toolchain_override(context) {
-                create_command("rustup")
-                    .and_then(|mut cmd| {
-                        cmd.args(&["run", toolchain, "rustc", "--version"])
-                            .current_dir(&context.current_dir)
-                            .output()
+                // First try running ~/.rustup/toolchains/<toolchain>/bin/rustc --version
+                rustup_home()
+                    .map(|rustup_folder| {
+                        rustup_folder
+                            .join("toolchains")
+                            .join(toolchain)
+                            .join("bin")
+                            .join("rustc")
                     })
+                    .and_then(|rustc| {
+                        log::trace!("Running rustc --version directly with {:?}", rustc);
+                        create_command(rustc).map(|mut cmd| {
+                            cmd.arg("--version");
+                            cmd
+                        })
+                    })
+                    .or_else(|_| {
+                        // If that fails, try running rustup rustup run <toolchain> rustc --version
+                        // Depending on the source of the toolchain override, it might not have been a full toolchain name ("stable" or "nightly").
+                        log::trace!("Running rustup {toolchain} rustc --version");
+                        create_command("rustup").map(|mut cmd| {
+                            cmd.args(["run", toolchain, "rustc", "--version"]);
+                            cmd
+                        })
+                    })
+                    .and_then(|mut cmd| cmd.current_dir(&context.current_dir).output())
                     .map(extract_toolchain_from_rustup_run_rustc_version)
                     .unwrap_or(RustupRunRustcVersionOutcome::RustupNotWorking)
             } else {
@@ -112,9 +138,7 @@ impl RustToolingEnvironmentInfo {
             .get_or_init(|| {
                 let Output { status, stdout, .. } = create_command("rustc")
                     .and_then(|mut cmd| {
-                        cmd.args(&["-Vv"])
-                            .current_dir(&context.current_dir)
-                            .output()
+                        cmd.args(["-Vv"]).current_dir(&context.current_dir).output()
                     })
                     .ok()?;
                 if !status.success() {
@@ -308,7 +332,7 @@ fn find_rust_toolchain_file(context: &Context) -> Option<String> {
 
     if context
         .dir_contents()
-        .map_or(false, |dir| dir.has_file("rust-toolchain"))
+        .is_ok_and(|dir| dir.has_file("rust-toolchain"))
     {
         if let Some(toolchain) = read_channel(Path::new("rust-toolchain"), false) {
             return Some(toolchain);
@@ -317,7 +341,7 @@ fn find_rust_toolchain_file(context: &Context) -> Option<String> {
 
     if context
         .dir_contents()
-        .map_or(false, |dir| dir.has_file("rust-toolchain.toml"))
+        .is_ok_and(|dir| dir.has_file("rust-toolchain.toml"))
     {
         if let Some(toolchain) = read_channel(Path::new("rust-toolchain.toml"), true) {
             return Some(toolchain);
@@ -370,15 +394,16 @@ fn format_rustc_version(rustc_version: &str, version_format: &str) -> Option<Str
         Ok(formatted) => Some(formatted),
         Err(error) => {
             log::warn!("Error formatting `rust` version:\n{}", error);
-            Some(format!("v{}", version))
+            Some(format!("v{version}"))
         }
     }
 }
 
 fn format_toolchain(toolchain: &str, default_host_triple: Option<&str>) -> String {
     default_host_triple
-        .map(|triple| toolchain.trim_end_matches(&format!("-{}", triple)))
-        .unwrap_or(toolchain)
+        .map_or(toolchain, |triple| {
+            toolchain.trim_end_matches(&format!("-{triple}"))
+        })
         .to_owned()
 }
 
@@ -394,17 +419,12 @@ fn format_rustc_version_verbose(stdout: &str, toolchain: Option<&str>) -> Option
     }
     let (release, host) = (release?, host?);
     let version = format_semver(release);
-    let toolchain = toolchain
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| host.to_string());
+    let toolchain = toolchain.map_or_else(|| host.to_string(), ToOwned::to_owned);
     Some((version, toolchain))
 }
 
 fn format_semver(semver: &str) -> String {
-    format!(
-        "v{}",
-        semver.find('-').map(|i| &semver[..i]).unwrap_or(semver)
-    )
+    format!("v{}", semver.find('-').map_or(semver, |i| &semver[..i]))
 }
 
 #[derive(Debug, PartialEq)]
@@ -470,19 +490,19 @@ impl RustupSettings {
         let cwd = strip_dos_path(cwd.to_owned());
         self.overrides
             .iter()
-            .map(|(dir, toolchain)| (strip_dos_path(dir.to_owned()), toolchain))
+            .map(|(dir, toolchain)| (strip_dos_path(dir.clone()), toolchain))
             .filter(|(dir, _)| cwd.starts_with(dir))
             .max_by_key(|(dir, _)| dir.components().count())
-            .map(|(_, name)| name.to_owned())
+            .map(|(_, name)| name.clone())
     }
 }
 
 #[cfg(test)]
 mod tests {
     use crate::context::{Shell, Target};
-    use once_cell::sync::Lazy;
     use std::io;
     use std::process::{ExitStatus, Output};
+    use std::sync::LazyLock;
 
     use super::*;
 
@@ -628,7 +648,7 @@ version = "12"
         #[cfg(windows)]
         use std::os::windows::process::ExitStatusExt as _;
 
-        static RUSTC_VERSION: Lazy<Output> = Lazy::new(|| Output {
+        static RUSTC_VERSION: LazyLock<Output> = LazyLock::new(|| Output {
             status: ExitStatus::from_raw(0),
             stdout: b"rustc 1.34.0\n"[..].to_owned(),
             stderr: vec![],
@@ -638,7 +658,7 @@ version = "12"
             RustupRunRustcVersionOutcome::RustcVersion("rustc 1.34.0\n".to_owned()),
         );
 
-        static TOOLCHAIN_NAME: Lazy<Output> = Lazy::new(|| Output {
+        static TOOLCHAIN_NAME: LazyLock<Output> = LazyLock::new(|| Output {
             status: ExitStatus::from_raw(1),
             stdout: vec![],
             stderr: b"error: toolchain 'channel-triple' is not installed\n"[..].to_owned(),
@@ -648,7 +668,7 @@ version = "12"
             RustupRunRustcVersionOutcome::ToolchainNotInstalled("channel-triple".to_owned()),
         );
 
-        static INVALID_STDOUT: Lazy<Output> = Lazy::new(|| Output {
+        static INVALID_STDOUT: LazyLock<Output> = LazyLock::new(|| Output {
             status: ExitStatus::from_raw(0),
             stdout: b"\xc3\x28"[..].to_owned(),
             stderr: vec![],
@@ -658,7 +678,7 @@ version = "12"
             RustupRunRustcVersionOutcome::Err,
         );
 
-        static INVALID_STDERR: Lazy<Output> = Lazy::new(|| Output {
+        static INVALID_STDERR: LazyLock<Output> = LazyLock::new(|| Output {
             status: ExitStatus::from_raw(1),
             stdout: vec![],
             stderr: b"\xc3\x28"[..].to_owned(),
@@ -668,7 +688,7 @@ version = "12"
             RustupRunRustcVersionOutcome::Err,
         );
 
-        static UNEXPECTED_FORMAT_OF_ERROR: Lazy<Output> = Lazy::new(|| Output {
+        static UNEXPECTED_FORMAT_OF_ERROR: LazyLock<Output> = LazyLock::new(|| Output {
             status: ExitStatus::from_raw(1),
             stdout: vec![],
             stderr: b"error:"[..].to_owned(),
@@ -715,6 +735,7 @@ version = "12"
             Target::Main,
             dir.path().into(),
             dir.path().into(),
+            Default::default(),
         );
 
         assert_eq!(
@@ -736,6 +757,7 @@ version = "12"
             Target::Main,
             dir.path().into(),
             dir.path().into(),
+            Default::default(),
         );
 
         assert_eq!(
@@ -757,6 +779,7 @@ version = "12"
             Target::Main,
             dir.path().into(),
             dir.path().into(),
+            Default::default(),
         );
 
         assert_eq!(
@@ -780,6 +803,7 @@ version = "12"
             Target::Main,
             child_dir_path.clone(),
             child_dir_path,
+            Default::default(),
         );
 
         assert_eq!(
@@ -800,6 +824,7 @@ version = "12"
             Target::Main,
             dir.path().into(),
             dir.path().into(),
+            Default::default(),
         );
 
         assert_eq!(find_rust_toolchain_file(&context), None);
@@ -818,6 +843,7 @@ version = "12"
             Target::Main,
             dir.path().into(),
             dir.path().into(),
+            Default::default(),
         );
 
         assert_eq!(
@@ -839,6 +865,7 @@ version = "12"
             Target::Main,
             dir.path().into(),
             dir.path().into(),
+            Default::default(),
         );
 
         assert_eq!(
@@ -862,6 +889,7 @@ version = "12"
             Target::Main,
             child_dir_path.clone(),
             child_dir_path,
+            Default::default(),
         );
 
         assert_eq!(
@@ -886,32 +914,32 @@ version = "12"
             };
         }
 
-        static STABLE: &str = r#"rustc 1.40.0 (73528e339 2019-12-16)
+        static STABLE: &str = r"rustc 1.40.0 (73528e339 2019-12-16)
 binary: rustc
 commit-hash: 73528e339aae0f17a15ffa49a8ac608f50c6cf14
 commit-date: 2019-12-16
 host: x86_64-unknown-linux-gnu
 release: 1.40.0
 LLVM version: 9.0
-"#;
+";
 
-        static BETA: &str = r#"rustc 1.41.0-beta.1 (eb3f7c2d3 2019-12-17)
+        static BETA: &str = r"rustc 1.41.0-beta.1 (eb3f7c2d3 2019-12-17)
 binary: rustc
 commit-hash: eb3f7c2d3aec576f47eba854cfbd3c1187b8a2a0
 commit-date: 2019-12-17
 host: x86_64-unknown-linux-gnu
 release: 1.41.0-beta.1
 LLVM version: 9.0
-"#;
+";
 
-        static NIGHTLY: &str = r#"rustc 1.42.0-nightly (da3629b05 2019-12-29)
+        static NIGHTLY: &str = r"rustc 1.42.0-nightly (da3629b05 2019-12-29)
 binary: rustc
 commit-hash: da3629b05f8f1b425a738bfe9fe9aedd47c5417a
 commit-date: 2019-12-29
 host: x86_64-unknown-linux-gnu
 release: 1.42.0-nightly
 LLVM version: 9.0
-"#;
+";
 
         test!(
             (STABLE, None) => Some(("v1.40.0", "x86_64-unknown-linux-gnu")),

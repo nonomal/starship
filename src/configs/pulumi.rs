@@ -1,7 +1,11 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Deserialize, Serialize)]
-#[cfg_attr(feature = "config-schema", derive(schemars::JsonSchema))]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(schemars::JsonSchema),
+    schemars(deny_unknown_fields)
+)]
 #[serde(default)]
 pub struct PulumiConfig<'a> {
     pub format: &'a str,
@@ -9,9 +13,10 @@ pub struct PulumiConfig<'a> {
     pub symbol: &'a str,
     pub style: &'a str,
     pub disabled: bool,
+    pub search_upwards: bool,
 }
 
-impl<'a> Default for PulumiConfig<'a> {
+impl Default for PulumiConfig<'_> {
     fn default() -> Self {
         PulumiConfig {
             format: "via [$symbol($username@)$stack]($style) ",
@@ -19,6 +24,7 @@ impl<'a> Default for PulumiConfig<'a> {
             symbol: " ",
             style: "bold 5",
             disabled: false,
+            search_upwards: true,
         }
     }
 }

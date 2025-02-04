@@ -1,8 +1,8 @@
 use ini::Ini;
-use once_cell::sync::{Lazy, OnceCell};
 use std::borrow::Cow;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::{LazyLock, OnceLock};
 
 use super::{Context, Module, ModuleConfig};
 
@@ -15,7 +15,7 @@ type Account<'a> = (&'a str, Option<&'a str>);
 struct GcloudContext {
     config_name: String,
     config_path: PathBuf,
-    config: OnceCell<Option<Ini>>,
+    config: OnceLock<Option<Ini>>,
 }
 
 impl<'a> GcloudContext {
@@ -56,7 +56,7 @@ fn get_current_config(context: &Context) -> Option<(String, PathBuf)> {
     let name = get_active_config(context, &config_dir)?;
     let path = config_dir
         .join("configurations")
-        .join(format!("config_{}", name));
+        .join(format!("config_{name}"));
     Some((name, path))
 }
 
@@ -84,9 +84,17 @@ pub fn module<'a>(context: &'a Context) -> Option<Module<'a>> {
     let mut module = context.new_module("gcloud");
     let config: GcloudConfig = GcloudConfig::try_load(module.config);
 
+    if !(context.detect_env_vars(&config.detect_env_vars)) {
+        return None;
+    }
+
     let (config_name, config_path) = get_current_config(context)?;
+
+    if config_name == "NONE" {
+        return None;
+    }
     let gcloud_context = GcloudContext::new(&config_name, &config_path);
-    let account: Lazy<Option<Account<'_>>, _> = Lazy::new(|| gcloud_context.get_account());
+    let account: LazyLock<Option<Account<'_>>, _> = LazyLock::new(|| gcloud_context.get_account());
 
     let parsed = StringFormatter::new(config.format).and_then(|formatter| {
         formatter
@@ -121,8 +129,7 @@ pub fn module<'a>(context: &'a Context) -> Option<Module<'a>> {
                             .project_aliases
                             .get(project.as_ref())
                             .copied()
-                            .map(Cow::Borrowed)
-                            .unwrap_or(project)
+                            .map_or(project, Cow::Borrowed)
                     })
                     .map(Ok),
                 "active" => Some(Ok(Cow::Borrowed(&gcloud_context.config_name))),
@@ -147,20 +154,69 @@ mod tests {
     use std::fs::{create_dir, File};
     use std::io::{self, Write};
 
-    use ansi_term::Color;
+    use nu_ansi_term::Color;
 
     use crate::test::ModuleRenderer;
+
+    #[test]
+    fn account_set_but_not_shown_because_of_detect_env_vars() -> io::Result<()> {
+        let dir = tempfile::tempdir()?;
+        let active_config_path = dir.path().join("active_config");
+        let mut active_config_file = File::create(active_config_path)?;
+        active_config_file.write_all(b"default")?;
+
+        // check if this config would lead to the module being rendered
+        assert_eq!(
+            ModuleRenderer::new("gcloud")
+                .env("CLOUDSDK_CONFIG", dir.path().to_string_lossy())
+                .config(toml::toml! {
+                    [gcloud]
+                    format = "$active"
+                })
+                .collect(),
+            Some("default".into())
+        );
+
+        // when we set `detect_env_vars` now, the module is empty
+        assert_eq!(
+            ModuleRenderer::new("gcloud")
+                .env("CLOUDSDK_CONFIG", dir.path().to_string_lossy())
+                .config(toml::toml! {
+                    [gcloud]
+                    format = "$active"
+                    detect_env_vars = ["SOME_TEST_VAR"]
+                })
+                .collect(),
+            None
+        );
+
+        // and when the environment variable has a value, the module is shown
+        assert_eq!(
+            ModuleRenderer::new("gcloud")
+                .env("CLOUDSDK_CONFIG", dir.path().to_string_lossy())
+                .env("SOME_TEST_VAR", "1")
+                .config(toml::toml! {
+                    [gcloud]
+                    format = "$active"
+                    detect_env_vars = ["SOME_TEST_VAR"]
+                })
+                .collect(),
+            Some("default".into())
+        );
+
+        dir.close()
+    }
 
     #[test]
     fn account_set() -> io::Result<()> {
         let dir = tempfile::tempdir()?;
         let active_config_path = dir.path().join("active_config");
-        let mut active_config_file = File::create(&active_config_path)?;
+        let mut active_config_file = File::create(active_config_path)?;
         active_config_file.write_all(b"default")?;
 
         create_dir(dir.path().join("configurations"))?;
         let config_default_path = dir.path().join("configurations").join("config_default");
-        let mut config_default_file = File::create(&config_default_path)?;
+        let mut config_default_file = File::create(config_default_path)?;
         config_default_file.write_all(
             b"\
 [core]
@@ -184,12 +240,12 @@ account = foo@example.com
     fn account_with_custom_format_set() -> io::Result<()> {
         let dir = tempfile::tempdir()?;
         let active_config_path = dir.path().join("active_config");
-        let mut active_config_file = File::create(&active_config_path)?;
+        let mut active_config_file = File::create(active_config_path)?;
         active_config_file.write_all(b"default")?;
 
         create_dir(dir.path().join("configurations"))?;
         let config_default_path = dir.path().join("configurations").join("config_default");
-        let mut config_default_file = File::create(&config_default_path)?;
+        let mut config_default_file = File::create(config_default_path)?;
         config_default_file.write_all(
             b"\
 [core]
@@ -214,12 +270,12 @@ account = foo@example.com
     fn account_and_region_set() -> io::Result<()> {
         let dir = tempfile::tempdir()?;
         let active_config_path = dir.path().join("active_config");
-        let mut active_config_file = File::create(&active_config_path)?;
+        let mut active_config_file = File::create(active_config_path)?;
         active_config_file.write_all(b"default")?;
 
         create_dir(dir.path().join("configurations"))?;
         let config_default_path = dir.path().join("configurations").join("config_default");
-        let mut config_default_file = File::create(&config_default_path)?;
+        let mut config_default_file = File::create(config_default_path)?;
         config_default_file.write_all(
             b"\
 [core]
@@ -246,12 +302,12 @@ region = us-central1
     fn account_and_region_set_with_alias() -> io::Result<()> {
         let dir = tempfile::tempdir()?;
         let active_config_path = dir.path().join("active_config");
-        let mut active_config_file = File::create(&active_config_path)?;
+        let mut active_config_file = File::create(active_config_path)?;
         active_config_file.write_all(b"default")?;
 
         create_dir(dir.path().join("configurations"))?;
         let config_default_path = dir.path().join("configurations").join("config_default");
-        let mut config_default_file = File::create(&config_default_path)?;
+        let mut config_default_file = File::create(config_default_path)?;
         config_default_file.write_all(
             b"\
 [core]
@@ -282,7 +338,7 @@ region = us-central1
     fn active_set() -> io::Result<()> {
         let dir = tempfile::tempdir()?;
         let active_config_path = dir.path().join("active_config");
-        let mut active_config_file = File::create(&active_config_path)?;
+        let mut active_config_file = File::create(active_config_path)?;
         active_config_file.write_all(b"default1")?;
 
         let actual = ModuleRenderer::new("gcloud")
@@ -302,12 +358,12 @@ region = us-central1
     fn project_set() -> io::Result<()> {
         let dir = tempfile::tempdir()?;
         let active_config_path = dir.path().join("active_config");
-        let mut active_config_file = File::create(&active_config_path)?;
+        let mut active_config_file = File::create(active_config_path)?;
         active_config_file.write_all(b"default")?;
 
         create_dir(dir.path().join("configurations"))?;
         let config_default_path = dir.path().join("configurations").join("config_default");
-        let mut config_default_file = File::create(&config_default_path)?;
+        let mut config_default_file = File::create(config_default_path)?;
         config_default_file.write_all(
             b"\
 [core]
@@ -332,12 +388,12 @@ project = abc
     fn project_set_in_env() -> io::Result<()> {
         let dir = tempfile::tempdir()?;
         let active_config_path = dir.path().join("active_config");
-        let mut active_config_file = File::create(&active_config_path)?;
+        let mut active_config_file = File::create(active_config_path)?;
         active_config_file.write_all(b"default")?;
 
         create_dir(dir.path().join("configurations"))?;
         let config_default_path = dir.path().join("configurations").join("config_default");
-        let mut config_default_file = File::create(&config_default_path)?;
+        let mut config_default_file = File::create(config_default_path)?;
         config_default_file.write_all(
             b"\
 [core]
@@ -366,12 +422,12 @@ project = abc
     fn project_set_with_alias() -> io::Result<()> {
         let dir = tempfile::tempdir()?;
         let active_config_path = dir.path().join("active_config");
-        let mut active_config_file = File::create(&active_config_path)?;
+        let mut active_config_file = File::create(active_config_path)?;
         active_config_file.write_all(b"default")?;
 
         create_dir(dir.path().join("configurations"))?;
         let config_default_path = dir.path().join("configurations").join("config_default");
-        let mut config_default_file = File::create(&config_default_path)?;
+        let mut config_default_file = File::create(config_default_path)?;
         config_default_file.write_all(
             b"\
 [core]
@@ -411,15 +467,25 @@ project = very-long-project-name
     }
 
     #[test]
+    fn no_active_config() {
+        let actual = ModuleRenderer::new("gcloud")
+            .env("CLOUDSDK_ACTIVE_CONFIG_NAME", "NONE")
+            .collect();
+        let expected = None;
+
+        assert_eq!(expected, actual);
+    }
+
+    #[test]
     fn active_config_manually_overridden() -> io::Result<()> {
         let dir = tempfile::tempdir()?;
         let active_config_path = dir.path().join("active_config");
-        let mut active_config_file = File::create(&active_config_path)?;
+        let mut active_config_file = File::create(active_config_path)?;
         active_config_file.write_all(b"default")?;
 
         create_dir(dir.path().join("configurations"))?;
         let config_default_path = dir.path().join("configurations").join("config_default");
-        let mut config_default_file = File::create(&config_default_path)?;
+        let mut config_default_file = File::create(config_default_path)?;
         config_default_file.write_all(
             b"\
 [core]
@@ -428,7 +494,7 @@ project = default
         )?;
 
         let config_overridden_path = dir.path().join("configurations").join("config_overridden");
-        let mut config_overridden_file = File::create(&config_overridden_path)?;
+        let mut config_overridden_file = File::create(config_overridden_path)?;
         config_overridden_file.write_all(
             b"\
 [core]
@@ -444,7 +510,11 @@ project = overridden
                 format = "on [$symbol$project]($style) "
             })
             .collect();
-        let expected = Some(format!("on {} ", Color::Blue.bold().paint("☁️  overridden")));
+        #[rustfmt::skip]
+        let expected = Some(format!(
+            "on {} ",
+            Color::Blue.bold().paint("☁️  overridden")
+        ));
 
         assert_eq!(actual, expected);
         dir.close()

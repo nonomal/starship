@@ -1,7 +1,11 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Deserialize, Serialize)]
-#[cfg_attr(feature = "config-schema", derive(schemars::JsonSchema))]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(schemars::JsonSchema),
+    schemars(deny_unknown_fields)
+)]
 #[serde(default)]
 pub struct SpackConfig<'a> {
     pub truncation_length: usize,
@@ -11,7 +15,7 @@ pub struct SpackConfig<'a> {
     pub disabled: bool,
 }
 
-impl<'a> Default for SpackConfig<'a> {
+impl Default for SpackConfig<'_> {
     fn default() -> Self {
         SpackConfig {
             truncation_length: 1,

@@ -1,7 +1,11 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Deserialize, Serialize)]
-#[cfg_attr(feature = "config-schema", derive(schemars::JsonSchema))]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(schemars::JsonSchema),
+    schemars(deny_unknown_fields)
+)]
 #[serde(default)]
 pub struct CConfig<'a> {
     pub format: &'a str,
@@ -15,7 +19,7 @@ pub struct CConfig<'a> {
     pub commands: Vec<Vec<&'a str>>,
 }
 
-impl<'a> Default for CConfig<'a> {
+impl Default for CConfig<'_> {
     fn default() -> Self {
         CConfig {
             format: "via [$symbol($version(-$name) )]($style)",

@@ -1,7 +1,11 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Deserialize, Serialize)]
-#[cfg_attr(feature = "config-schema", derive(schemars::JsonSchema))]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(schemars::JsonSchema),
+    schemars(deny_unknown_fields)
+)]
 #[serde(default)]
 pub struct HelmConfig<'a> {
     pub format: &'a str,
@@ -14,7 +18,7 @@ pub struct HelmConfig<'a> {
     pub detect_folders: Vec<&'a str>,
 }
 
-impl<'a> Default for HelmConfig<'a> {
+impl Default for HelmConfig<'_> {
     fn default() -> Self {
         HelmConfig {
             format: "via [$symbol($version )]($style)",

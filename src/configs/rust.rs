@@ -1,7 +1,11 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Deserialize, Serialize)]
-#[cfg_attr(feature = "config-schema", derive(schemars::JsonSchema))]
+#[cfg_attr(
+    feature = "config-schema",
+    derive(schemars::JsonSchema),
+    schemars(deny_unknown_fields)
+)]
 #[serde(default)]
 pub struct RustConfig<'a> {
     pub format: &'a str,
@@ -14,7 +18,7 @@ pub struct RustConfig<'a> {
     pub detect_folders: Vec<&'a str>,
 }
 
-impl<'a> Default for RustConfig<'a> {
+impl Default for RustConfig<'_> {
     fn default() -> Self {
         RustConfig {
             format: "via [$symbol($version )]($style)",

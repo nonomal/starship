@@ -1,13 +1,17 @@
-[Retornar para Personalizações](./README.md#plain-text-symbols)
+[Retornar para Predefinições](./#plain-text-symbols)
 
 ## Personalização de símbolos de texto simples
 
 Essa personalização converte os símbolos para cada módulo em texto simples. Importante para quando não tiver suporte para caracteres Unicode.
 
-![Captura de tela da predefinição de símbolos de texto simples](/presets/img/plain-text-symbols.png)
+![Captura de tela de personalização de símbolos de texto simples](/presets/img/plain-text-symbols.png)
 
 ### Configuração
 
-[Clique para baixar o TOML](/presets/toml/plain-text-symbols.toml)
+```sh
+starship preset plain-text-symbols -o ~/.config/starship.toml
+```
 
-<<< @/.vuepress/public/presets/toml/plain-text-symbols.toml
+[Click to download TOML](/presets/toml/plain-text-symbols.toml){download}
+
+<<< @/public/presets/toml/plain-text-symbols.toml
